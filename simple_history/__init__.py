@@ -31,4 +31,6 @@ def register(
     records.module = app and ("%s.models" % app) or model.__module__
     records.add_extra_methods(model)
     records.finalize(model)
+    records.cls = model
+    records.setup_m2m_history(model)
     models.registered_models[model._meta.db_table] = model

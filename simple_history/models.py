@@ -13,7 +13,7 @@ from django.utils.encoding import python_2_unicode_compatible, smart_text
 from django.utils.timezone import now
 from django.utils.translation import string_concat, ugettext_lazy as _
 
-from . import exceptions
+from . import exceptions, register
 from .manager import HistoryDescriptor
 
 try:
@@ -37,11 +37,12 @@ class HistoricalRecords(object):
 
     def __init__(self, verbose_name=None, bases=(models.Model,),
                  user_related_name='+', table_name=None, inherit=False,
-                 excluded_fields=None):
+                 excluded_fields=None, m2m_fields=None):
         self.user_set_verbose_name = verbose_name
         self.user_related_name = user_related_name
         self.table_name = table_name
         self.inherit = inherit
+        self.m2m_fields = m2m_fields
         if excluded_fields is None:
             excluded_fields = []
         self.excluded_fields = excluded_fields
@@ -59,6 +60,46 @@ class HistoricalRecords(object):
         models.signals.class_prepared.connect(self.finalize, weak=False)
         self.add_extra_methods(cls)
 
+    def setup_m2m_history(self, cls):
+        m2m_history_fields = self.m2m_fields
+        if m2m_history_fields:
+            assert isinstance(m2m_history_fields, list) or isinstance(m2m_history_fields, tuple), \
+                'm2m_history_fields must be a list or tuple'
+            for field_name in m2m_history_fields:
+                field = getattr(cls, field_name).field
+                assert isinstance(field, models.fields.related.ManyToManyField), \
+                    '%s must be a ManyToManyField' % field_name
+                if not sum([isinstance(item, HistoricalRecords) for item in field.rel.through.__dict__.values()]):
+                    field.rel.through.history = HistoricalRecords()
+                    register(field.rel.through, app=self.module.split('.')[0])
+
+    def m2m_changed(self, action, instance, sender, **kwargs):
+        source_field_name, target_field_name = None, None
+        for field_name, field_value in sender.__dict__.items():
+            if isinstance(field_value, models.fields.related.ReverseSingleRelatedObjectDescriptor):
+                try:
+                    root_model = field_value.field.related.parent_model
+                except AttributeError:
+                    root_model = field_value.field.related.model
+
+                if root_model == kwargs['model']:
+                    target_field_name = field_name
+                elif root_model == type(instance):
+                    source_field_name = field_name
+
+        items = sender.objects.filter(**{source_field_name: instance})
+        if kwargs['pk_set']:
+            items = items.filter(**{target_field_name + '__id__in': kwargs['pk_set']})
+        for item in items:
+            if action == 'post_add':
+                if hasattr(item, 'skip_history_when_saving'):
+                    return
+                self.create_historical_record(item, '+')
+            elif action == 'pre_remove':
+                self.create_historical_record(item, '-')
+            elif action == 'pre_clear':
+                self.create_historical_record(item, '-')
+
     def add_extra_methods(self, cls):
         def save_without_historical_record(self, *args, **kwargs):
             """
@@ -74,6 +115,11 @@ class HistoricalRecords(object):
             return ret
         setattr(cls, 'save_without_historical_record',
                 save_without_historical_record)
+
+        def save_as_draft(instance):
+            self.create_historical_record(instance, '#')
+
+        setattr(cls, 'save_as_draft', save_as_draft)
 
     def finalize(self, sender, **kwargs):
         try:
@@ -91,6 +137,7 @@ class HistoricalRecords(object):
                     sender._meta.object_name,
                 )
             )
+        self.setup_m2m_history(sender)
         history_model = self.create_history_model(sender)
         module = importlib.import_module(self.module)
         setattr(module, history_model.__name__, history_model)
@@ -99,6 +146,8 @@ class HistoricalRecords(object):
         # so the signal handlers can't use weak references.
         models.signals.post_save.connect(self.post_save, sender=sender,
                                          weak=False)
+        models.signals.m2m_changed.connect(self.m2m_changed, sender=sender, weak=False)
+
         models.signals.post_delete.connect(self.post_delete, sender=sender,
                                            weak=False)
 
@@ -244,6 +293,7 @@ class HistoricalRecords(object):
                 ('+', _('Created')),
                 ('~', _('Changed')),
                 ('-', _('Deleted')),
+                ('#', _('Drafted')),
             )),
             'history_object': HistoricalObjectDescriptor(model, self.fields_included(model)),
             'instance': property(get_instance),
