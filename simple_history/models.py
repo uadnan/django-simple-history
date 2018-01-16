@@ -28,8 +28,8 @@ else:  # south configuration for CustomForeignKeyField
     add_introspection_rules(
         [], ["^simple_history.models.CustomForeignKeyField"])
 
-
 registered_models = {}
+pending_registration = []
 
 
 class HistoricalRecords(object):
@@ -69,9 +69,23 @@ class HistoricalRecords(object):
                 field = getattr(cls, field_name).field
                 assert isinstance(field, models.fields.related.ManyToManyField), \
                     '%s must be a ManyToManyField' % field_name
-                if not sum([isinstance(item, HistoricalRecords) for item in field.rel.through.__dict__.values()]):
-                    field.rel.through.history = HistoricalRecords()
-                    register(field.rel.through, app=self.module.split('.')[0])
+
+                if isinstance(field.rel.through, str):
+                    model_path = field.rel.through.lower().split('.')
+                    if len(model_path) == 2:
+                        app_label, model_name = model_path
+                    else:
+                        app_label = cls._meta.app_label
+                        model_name = model_path[0]
+
+                    pending_registration.append((app_label, model_name))
+                else:
+                    self._setup_history(field.rel.through)
+
+    def _setup_history(self, cls):
+        if not sum([isinstance(item, HistoricalRecords) for item in cls.__dict__.values()]):
+            cls.history = HistoricalRecords()
+            register(cls)
 
     def m2m_changed(self, action, instance, sender, **kwargs):
         source_field_name, target_field_name = None, None
@@ -113,6 +127,7 @@ class HistoricalRecords(object):
             finally:
                 del self.skip_history_when_saving
             return ret
+
         setattr(cls, 'save_without_historical_record',
                 save_without_historical_record)
 
@@ -122,6 +137,12 @@ class HistoricalRecords(object):
         setattr(cls, 'save_as_draft', save_as_draft)
 
     def finalize(self, sender, **kwargs):
+        if issubclass(sender, models.Model):
+            key = (sender._meta.app_label, sender._meta.model_name)
+            if key in pending_registration:
+                pending_registration.remove(key)
+                self._setup_history(sender)
+
         try:
             hint_class = self.cls
         except AttributeError:  # called via `register`
@@ -137,6 +158,7 @@ class HistoricalRecords(object):
                     sender._meta.object_name,
                 )
             )
+
         self.setup_m2m_history(sender)
         history_model = self.create_history_model(sender)
         module = importlib.import_module(self.module)
