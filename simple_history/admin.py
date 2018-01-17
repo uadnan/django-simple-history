@@ -151,6 +151,12 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
             self.get_readonly_fields(request, obj),
             model_admin=self,
         )
+        media = self.media + admin_form.media
+        formsets, inline_instances = self._create_formsets(request, obj, change=True)
+
+        inline_formsets = self.get_inline_formsets(request, formsets, inline_instances, obj)
+        for inline_formset in inline_formsets:
+            media = media + inline_formset.media
 
         model_name = original_opts.model_name
         url_triplet = self.admin_site.name, original_opts.app_label, model_name
@@ -186,6 +192,7 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
             'save_as': self.save_as,
             'save_on_top': self.save_on_top,
             'root_path': getattr(self.admin_site, 'root_path', None),
+            'inline_admin_formsets': inline_formsets,
         }
         extra_kwargs = {}
         if get_complete_version() < (1, 8):
